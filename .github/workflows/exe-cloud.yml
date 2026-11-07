@@ -1,0 +1,51 @@
+name: EXE CLOUD
+run-name: EXE CLOUD · ${{ inputs.exe_name || 'sin archivo' }}
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag: { required: false, default: '' }
+      exe_name: { required: false, default: '' }
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 355
+    steps:
+      - name: Conectar a Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: ${{ vars.TS_HOSTNAME || 'exe-cloud' }}
+      - name: Instalar escritorio web
+        shell: pwsh
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          choco install tightvnc -y --no-progress --ia "SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=$env:VNC_PASSWORD"
+          Invoke-WebRequest https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip -OutFile novnc.zip
+          Expand-Archive novnc.zip -DestinationPath C:/novnc
+          pip install websockify
+          Start-Process python -ArgumentList '-m','websockify','--web','C:/novnc/noVNC-1.5.0','6080','127.0.0.1:5900' -WindowStyle Hidden
+          New-NetFirewallRule -DisplayName novnc -Direction Inbound -Protocol TCP -LocalPort 6080,5900 -Action Allow | Out-Null
+      - name: Descargar el .exe
+        if: ${{ inputs.release_tag != '' && inputs.exe_name != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+          NAME: ${{ inputs.exe_name }}
+        run: |
+          gh release download $env:TAG --repo ${{ github.repository }} --pattern $env:NAME --dir C:/Users/Public/Desktop
+          if ($LASTEXITCODE -ne 0) { throw 'No se pudo descargar el .exe' }
+      - name: Listo para conectar
+        shell: pwsh
+        run: |
+          foreach ($i in 1..30) {
+            if ((Test-NetConnection 127.0.0.1 -Port 5900).TcpTestSucceeded -and (Test-NetConnection 127.0.0.1 -Port 6080).TcpTestSucceeded) { tailscale ip -4; exit 0 }
+            Start-Sleep 2
+          }
+          throw 'El servidor VNC o noVNC no arrancó'
+      - name: Mantener la sesión activa
+        shell: pwsh
+        run: while ($true) { Start-Sleep -Seconds 60 }

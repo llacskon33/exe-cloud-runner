@@ -23,13 +23,20 @@ jobs:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
           choco install tightvnc -y --no-progress --ia "SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=$env:VNC_PASSWORD SET_ALLOWLOOPBACK=1 VALUE_OF_ALLOWLOOPBACK=1"
-          New-Item -Path 'HKLM:\SOFTWARE\TightVNC\Server' -Force | Out-Null
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\TightVNC\Server' -Name AllowLoopback -Value 1 -Type DWord
-          Restart-Service tvnserver -ErrorAction SilentlyContinue
+          $k = 'HKLM:\SOFTWARE\TightVNC\Server'
+          if (-not (Test-Path $k)) { New-Item -Path $k | Out-Null }
+          Set-ItemProperty -Path $k -Name AllowLoopback -Value 1 -Type DWord
+          Set-ItemProperty -Path $k -Name LoopbackOnly -Value 0 -Type DWord
+          Stop-Service tvnserver -Force -ErrorAction SilentlyContinue
+          Start-Service tvnserver
+          Get-Service tvnserver | Format-List Name,Status
+          Get-ItemProperty $k | Select-Object AllowLoopback,LoopbackOnly,UseVncAuthentication | Format-List
           Invoke-WebRequest https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip -OutFile novnc.zip
           Expand-Archive novnc.zip -DestinationPath C:/novnc
           pip install websockify
-          Start-Process python -ArgumentList '-m','websockify','--web','C:/novnc/noVNC-1.5.0','6080','127.0.0.1:5900' -WindowStyle Hidden
+          $ip = (tailscale ip -4 | Select-Object -First 1)
+          if (-not $ip) { $ip = '127.0.0.1' }
+          Start-Process python -ArgumentList '-m','websockify','--web','C:/novnc/noVNC-1.5.0','6080',"$($ip):5900" -WindowStyle Hidden
           New-NetFirewallRule -DisplayName novnc -Direction Inbound -Protocol TCP -LocalPort 6080,5900 -Action Allow | Out-Null
       - name: Descargar el .exe
         if: ${{ inputs.upload_branch != '' }}

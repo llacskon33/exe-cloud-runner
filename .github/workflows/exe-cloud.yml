@@ -3,10 +3,10 @@ run-name: EXE CLOUD · ${{ inputs.exe_name || 'sin archivo' }}
 on:
   workflow_dispatch:
     inputs:
-      release_tag: { required: false, default: '' }
+      upload_branch: { required: false, default: '' }
       exe_name: { required: false, default: '' }
 permissions:
-  contents: read
+  contents: write
 jobs:
   windows:
     runs-on: windows-latest
@@ -29,15 +29,25 @@ jobs:
           Start-Process python -ArgumentList '-m','websockify','--web','C:/novnc/noVNC-1.5.0','6080','127.0.0.1:5900' -WindowStyle Hidden
           New-NetFirewallRule -DisplayName novnc -Direction Inbound -Protocol TCP -LocalPort 6080,5900 -Action Allow | Out-Null
       - name: Descargar el .exe
-        if: ${{ inputs.release_tag != '' && inputs.exe_name != '' }}
+        if: ${{ inputs.upload_branch != '' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.upload_branch }}
+          path: payload
+      - name: Montar el .exe en el escritorio
+        if: ${{ inputs.upload_branch != '' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
+          BRANCH: ${{ inputs.upload_branch }}
           NAME: ${{ inputs.exe_name }}
         run: |
-          gh release download $env:TAG --repo ${{ github.repository }} --pattern $env:NAME --dir C:/Users/Public/Desktop
-          if ($LASTEXITCODE -ne 0) { throw 'No se pudo descargar el .exe' }
+          New-Item -ItemType Directory -Force C:/Users/Public/Desktop | Out-Null
+          $o = [IO.File]::Create("C:/Users/Public/Desktop/$env:NAME")
+          Get-ChildItem payload -Filter 'part-*' | Sort-Object Name | ForEach-Object { $b = [IO.File]::ReadAllBytes($_.FullName); $o.Write($b, 0, $b.Length) }
+          $o.Close()
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$env:BRANCH"
+          exit 0
       - name: Listo para conectar
         shell: pwsh
         run: |

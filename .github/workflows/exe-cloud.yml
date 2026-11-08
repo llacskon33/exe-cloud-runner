@@ -6,6 +6,9 @@ on:
       upload_branch: { required: false, default: '' }
       exe_name: { required: false, default: '' }
       ts_host: { required: false, default: '' }
+      kiosk: { required: false, default: 'false' }
+      save: { required: false, default: 'false' }
+      save_paths: { required: false, default: '' }
 permissions:
   contents: write
 jobs:
@@ -82,18 +85,160 @@ jobs:
           $o.Close()
           gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$env:BRANCH"
           exit 0
-      - name: Listo para conectar
+      - name: Preparar guardado
+        if: ${{ inputs.save == 'true' }}
         shell: pwsh
         run: |
+          $script = @'
+          param([string]$Action)
+          $ErrorActionPreference = 'Continue'
+          $work = 'C:/exe-save-work'
+          $root = $env:USERPROFILE
+          New-Item -ItemType Directory -Force $work | Out-Null
+          $aes = [Security.Cryptography.AesGcm]::new([Convert]::FromBase64String($env:SAVE_KEY))
+          if ($Action -eq 'save') {
+            $rel = @('AppData/Roaming', 'Documents', 'Saved Games') + @(($env:SAVE_PATHS -split '[,;]') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            $rel = @($rel | Where-Object { Test-Path (Join-Path $root $_) })
+            if (-not $rel.Count) { Write-Host 'Nada que guardar'; exit 0 }
+            Remove-Item "$work/part-*", "$work/save.tgz" -ErrorAction SilentlyContinue
+            $tgz = "$work/save.tgz"
+            tar -czf $tgz -C $root --exclude=Cache --exclude=GPUCache --exclude='Code Cache' --exclude=Temp @rel
+            $fs = [IO.File]::OpenRead($tgz)
+            $buf = New-Object byte[] (50MB)
+            $i = 0
+            while (($n = $fs.Read($buf, 0, $buf.Length)) -gt 0) {
+              $pt = New-Object byte[] $n; [Array]::Copy($buf, 0, $pt, 0, $n)
+              $iv = New-Object byte[] 12; [Security.Cryptography.RandomNumberGenerator]::Fill($iv)
+              $ct = New-Object byte[] $n; $tg = New-Object byte[] 16
+              $aes.Encrypt($iv, $pt, $ct, $tg)
+              $out = [IO.File]::Create("$work/part-" + $i.ToString('0000'))
+              $out.Write($iv, 0, 12); $out.Write($ct, 0, $n); $out.Write($tg, 0, 16); $out.Close()
+              $i++
+            }
+            $fs.Close()
+            $tag = 'save-' + $env:RUN
+            $files = @(Get-ChildItem "$work/part-*" | ForEach-Object { $_.FullName })
+            if (-not $files.Count) { exit 0 }
+            gh release create $tag @files --title $tag --notes 'EXE CLOUD save' --latest=false
+            if ($LASTEXITCODE -eq 0) {
+              gh release list --limit 100 --json tagName | ConvertFrom-Json | Where-Object { $_.tagName -like 'save-*' -and $_.tagName -ne $tag } | ForEach-Object { gh release delete $_.tagName --yes --cleanup-tag }
+              Write-Host "Progreso guardado ($i partes)"
+            } else { Write-Host 'No se pudo subir el progreso' }
+          } else {
+            $latest = gh release list --limit 100 --json tagName,createdAt | ConvertFrom-Json | Where-Object { $_.tagName -like 'save-*' } | Sort-Object createdAt -Descending | Select-Object -First 1
+            if (-not $latest) { Write-Host 'No hay progreso guardado todavía'; exit 0 }
+            Remove-Item "$work/part-*" -ErrorAction SilentlyContinue
+            gh release download $latest.tagName --dir $work --pattern 'part-*'
+            $tgz = "$work/restore.tgz"
+            $o = [IO.File]::Create($tgz)
+            try {
+              foreach ($f in (Get-ChildItem "$work/part-*" | Sort-Object Name)) {
+                $b = [IO.File]::ReadAllBytes($f.FullName)
+                $cl = $b.Length - 28
+                $nn = New-Object byte[] 12; [Array]::Copy($b, 0, $nn, 0, 12)
+                $t = New-Object byte[] 16; [Array]::Copy($b, $b.Length - 16, $t, 0, 16)
+                $c = New-Object byte[] $cl; [Array]::Copy($b, 12, $c, 0, $cl)
+                $p = New-Object byte[] $cl
+                $aes.Decrypt($nn, $c, $t, $p)
+                $o.Write($p, 0, $cl)
+              }
+              $o.Close()
+              tar -xzf $tgz -C $root
+              Write-Host 'Progreso recuperado'
+            } catch { $o.Close(); Write-Host "No se pudo recuperar el progreso: $_" }
+          }
+          '@
+          Set-Content C:/exe-save.ps1 $script
+      - name: Recuperar progreso
+        if: ${{ inputs.save == 'true' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+          SAVE_KEY: ${{ secrets.SAVE_KEY }}
+        run: |
+          pwsh -File C:/exe-save.ps1 -Action restore
+          New-Item C:/exe-save-ready -ItemType File -Force | Out-Null
+      - name: Listo para conectar
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+        run: |
+          $ok = $false
           foreach ($i in 1..30) {
-            if ((Test-NetConnection 127.0.0.1 -Port 5900).TcpTestSucceeded -and (Test-NetConnection 127.0.0.1 -Port 6080).TcpTestSucceeded) { tailscale ip -4; exit 0 }
+            if ((Test-NetConnection 127.0.0.1 -Port 5900 -WarningAction SilentlyContinue).TcpTestSucceeded -and (Test-NetConnection 127.0.0.1 -Port 6080 -WarningAction SilentlyContinue).TcpTestSucceeded) { $ok = $true; break }
             Start-Sleep 2
           }
-          Get-Service tvnserver | Format-List Name,Status
-          netstat -ano | findstr ":5900 :6080"
-          Get-Content C:/novnc/ws.err.log -ErrorAction SilentlyContinue
-          Get-Content C:/novnc/ws.log -ErrorAction SilentlyContinue
-          throw 'El servidor VNC o noVNC no arrancó'
+          if (-not $ok) {
+            Get-Service tvnserver | Format-List Name,Status
+            netstat -ano | findstr ":5900 :6080"
+            Get-Content C:/novnc/ws.err.log -ErrorAction SilentlyContinue
+            Get-Content C:/novnc/ws.log -ErrorAction SilentlyContinue
+            throw 'El servidor VNC o noVNC no arrancó'
+          }
+          $ip = (tailscale ip -4 | Select-Object -First 1)
+          Write-Host "IP de Tailscale: $ip"
+          $json = '{"run":"' + $env:RUN + '","ip":"' + $ip + '"}'
+          $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+          $sha = gh api "repos/$env:REPO/contents/status.json" --jq .sha 2>$null
+          $ga = @('api','-X','PUT',"repos/$env:REPO/contents/status.json",'-f','message=status','-f',"content=$b64")
+          if ($sha) { $ga += @('-f',"sha=$sha") }
+          gh @ga | Out-Null
+      - name: Abrir el programa
+        if: ${{ inputs.exe_name != '' && inputs.kiosk == 'true' }}
+        shell: pwsh
+        env:
+          NAME: ${{ inputs.exe_name }}
+        run: |
+          $exe = 'C:\Users\Public\Desktop\' + $env:NAME
+          $u = (Get-CimInstance Win32_ComputerSystem).UserName
+          if (-not $u) { $u = 'runneradmin' }
+          Write-Host "Usuario con sesión: $u"
+          try {
+            $a = New-ScheduledTaskAction -Execute $exe -WorkingDirectory 'C:\Users\Public\Desktop'
+            $pr = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Highest
+            Register-ScheduledTask -TaskName exe-kiosk -Action $a -Principal $pr -Force | Out-Null
+            Start-ScheduledTask -TaskName exe-kiosk
+          } catch {
+            Write-Host "Tarea programada falló: $_"
+            Start-Process $exe
+          }
+          Start-Sleep 8
+          Get-Process | Where-Object { $_.ProcessName -eq [IO.Path]::GetFileNameWithoutExtension($env:NAME) } | Format-Table Id,ProcessName,SessionId
       - name: Mantener la sesión activa
         shell: pwsh
-        run: while ($true) { Start-Sleep -Seconds 60 }
+        env:
+          NAME: ${{ inputs.exe_name }}
+          KIOSK: ${{ inputs.kiosk }}
+        run: |
+          if ($env:NAME -and $env:KIOSK -eq 'true') {
+            $pn = [IO.Path]::GetFileNameWithoutExtension($env:NAME)
+            $seen = $false; $gone = 0; $idle = 0
+            while ($true) {
+              Start-Sleep 3
+              $alive = [bool](Get-Process -Name $pn -ErrorAction SilentlyContinue)
+              if ($alive) { $seen = $true; $gone = 0 }
+              elseif ($seen) { $gone += 3; if ($gone -ge 15) { Write-Host 'El programa se cerró: fin de la sesión'; exit 0 } }
+              if ($seen) { Stop-Process -Name explorer,Taskmgr,tailscale-ipn -Force -ErrorAction SilentlyContinue }
+              $c = (Get-NetTCPConnection -LocalPort 5900 -State Established -ErrorAction SilentlyContinue | Measure-Object).Count
+              if ($c -gt 0) { $idle = 0 } else { $idle += 3; if ($idle -ge 600) { Write-Host 'Sin conexión durante 10 minutos: fin de la sesión'; exit 0 } }
+            }
+          } else {
+            while ($true) { Start-Sleep -Seconds 60 }
+          }
+      - name: Guardar progreso
+        if: ${{ always() && inputs.save == 'true' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+          SAVE_KEY: ${{ secrets.SAVE_KEY }}
+          SAVE_PATHS: ${{ inputs.save_paths }}
+        run: |
+          if (-not (Test-Path C:/exe-save-ready)) { Write-Host 'No se llegó a recuperar el progreso; no se guarda para no pisar el anterior.'; exit 0 }
+          Stop-Process -Name explorer -ErrorAction SilentlyContinue
+          pwsh -File C:/exe-save.ps1 -Action save

@@ -8,9 +8,6 @@ on:
       ts_host: { required: false, default: '' }
 permissions:
   contents: write
-concurrency:
-  group: exe-cloud
-  cancel-in-progress: true
 jobs:
   windows:
     runs-on: windows-latest
@@ -38,7 +35,7 @@ jobs:
           Invoke-WebRequest https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip -OutFile novnc.zip
           Expand-Archive novnc.zip -DestinationPath C:/novnc
           python -m pip install websockify
-          Start-Process python -ArgumentList '-m','websockify','--web','C:/novnc/noVNC-1.5.0','0.0.0.0:6080','127.0.0.1:5900' -WindowStyle Hidden
+          Start-Process python -ArgumentList '-m','websockify','--web','C:/novnc/noVNC-1.5.0','0.0.0.0:6080','127.0.0.1:5900' -RedirectStandardOutput C:/novnc/ws.log -RedirectStandardError C:/novnc/ws.err.log -WindowStyle Hidden
           New-NetFirewallRule -DisplayName novnc -Direction Inbound -Protocol TCP -LocalPort 6080,5900 -Action Allow | Out-Null
       - name: Descargar el .exe
         if: ${{ inputs.upload_branch != '' }}
@@ -53,10 +50,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ inputs.upload_branch }}
           NAME: ${{ inputs.exe_name }}
+          EXE_KEY: ${{ secrets.EXE_KEY }}
         run: |
           New-Item -ItemType Directory -Force C:/Users/Public/Desktop | Out-Null
           $o = [IO.File]::Create("C:/Users/Public/Desktop/$env:NAME")
-          Get-ChildItem payload -Filter 'part-*' | Sort-Object Name | ForEach-Object { $b = [IO.File]::ReadAllBytes($_.FullName); $o.Write($b, 0, $b.Length) }
+          $aes = [Security.Cryptography.AesGcm]::new([Convert]::FromBase64String($env:EXE_KEY))
+          foreach ($f in (Get-ChildItem payload -Filter 'part-*' | Sort-Object Name)) {
+            $b = [IO.File]::ReadAllBytes($f.FullName)
+            $cl = $b.Length - 28
+            $n = New-Object byte[] 12; [Array]::Copy($b, 0, $n, 0, 12)
+            $t = New-Object byte[] 16; [Array]::Copy($b, $b.Length - 16, $t, 0, 16)
+            $c = New-Object byte[] $cl; [Array]::Copy($b, 12, $c, 0, $cl)
+            $p = New-Object byte[] $cl
+            $aes.Decrypt($n, $c, $t, $p)
+            $o.Write($p, 0, $cl)
+          }
           $o.Close()
           gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$env:BRANCH"
           exit 0
@@ -67,6 +75,10 @@ jobs:
             if ((Test-NetConnection 127.0.0.1 -Port 5900).TcpTestSucceeded -and (Test-NetConnection 127.0.0.1 -Port 6080).TcpTestSucceeded) { tailscale ip -4; exit 0 }
             Start-Sleep 2
           }
+          Get-Service tvnserver | Format-List Name,Status
+          netstat -ano | findstr ":5900 :6080"
+          Get-Content C:/novnc/ws.err.log -ErrorAction SilentlyContinue
+          Get-Content C:/novnc/ws.log -ErrorAction SilentlyContinue
           throw 'El servidor VNC o noVNC no arrancó'
       - name: Mantener la sesión activa
         shell: pwsh

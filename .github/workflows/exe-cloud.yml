@@ -8,6 +8,9 @@ on:
       ts_host: { required: false, default: '' }
 permissions:
   contents: write
+concurrency:
+  group: exe-cloud
+  cancel-in-progress: true
 jobs:
   windows:
     runs-on: windows-latest

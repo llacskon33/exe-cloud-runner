@@ -5,6 +5,7 @@ on:
     inputs:
       upload_branch: { required: false, default: '' }
       exe_name: { required: false, default: '' }
+      ts_host: { required: false, default: '' }
 permissions:
   contents: write
 jobs:
@@ -16,7 +17,7 @@ jobs:
         uses: tailscale/github-action@v3
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
-          hostname: ${{ vars.TS_HOSTNAME || 'exe-cloud' }}
+          hostname: ${{ inputs.ts_host || vars.TS_HOSTNAME || 'exe-cloud' }}
       - name: Instalar escritorio web
         shell: pwsh
         env:
@@ -33,10 +34,8 @@ jobs:
           Get-ItemProperty $k | Select-Object AllowLoopback,LoopbackOnly,UseVncAuthentication | Format-List
           Invoke-WebRequest https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip -OutFile novnc.zip
           Expand-Archive novnc.zip -DestinationPath C:/novnc
-          pip install websockify
-          $ip = (tailscale ip -4 | Select-Object -First 1)
-          if (-not $ip) { $ip = '127.0.0.1' }
-          Start-Process python -ArgumentList '-m','websockify','--web','C:/novnc/noVNC-1.5.0','6080',"$($ip):5900" -WindowStyle Hidden
+          python -m pip install websockify
+          Start-Process python -ArgumentList '-m','websockify','--web','C:/novnc/noVNC-1.5.0','0.0.0.0:6080','127.0.0.1:5900' -WindowStyle Hidden
           New-NetFirewallRule -DisplayName novnc -Direction Inbound -Protocol TCP -LocalPort 6080,5900 -Action Allow | Out-Null
       - name: Descargar el .exe
         if: ${{ inputs.upload_branch != '' }}

@@ -39,6 +39,8 @@ jobs:
           Expand-Archive novnc.zip -DestinationPath C:/novnc
           python -m pip install websockify
           New-NetFirewallRule -DisplayName novnc -Direction Inbound -Protocol TCP -LocalPort 6080,5900 -Action Allow | Out-Null
+          Add-Type -Namespace W -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint a, uint b, IntPtr c, uint d);'
+          [W.U]::SystemParametersInfo(0x1021, 0, [IntPtr]::Zero, 3) | Out-Null
       - name: Iniciar noVNC
         shell: pwsh
         run: |
